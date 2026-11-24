@@ -17,7 +17,7 @@ METODOS_PAGO = [
     (r"yape", "yape"),
     (r"plin", "plin"),
     (r"(efect|efv|cash|contado)", "efectivo"),
-    (r"(transf|deposit|banca)", "transferencia"),
+    (r"(transf|^trf$|deposit|banca)", "transferencia"),
     (r"(tarj|^tc$|^td$|credit|debit|visa|master|amex|pos)", "tarjeta"),
 ]
 

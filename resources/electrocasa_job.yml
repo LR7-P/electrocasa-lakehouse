@@ -11,7 +11,7 @@ resources:
 
       # Disparo por llegada de archivo: los lotes llegan sin calendario fijo
       trigger:
-        pause_status: ${var.trigger_pausa}
+        pause_status: PAUSED
         file_arrival:
           url: /Volumes/${var.catalogo}/default/vol_landing/
           min_time_between_triggers_seconds: 300
