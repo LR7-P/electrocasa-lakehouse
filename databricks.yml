@@ -14,10 +14,10 @@ variables:
     default: electrocasa_dev
   email_alertas:
     description: Correo que recibe las alertas de fallo y éxito del job
-    default: CAMBIAR_POR_TU_CORREO@ejemplo.com
+    default: riospalermo@gmail.com
   tracking_pipeline_id:
     description: ID de la pipeline de ingesta de Tracking (conector query-based de SQL Server creado en la UI)
-    default: CAMBIAR_POR_ID_PIPELINE_TRACKING
+    default: 8a30628c-f1ee-44b1-a8a7-bb3b08c185dc
   tracking_tabla:
     description: Tabla destino del conector de Tracking (Bronze de esa fuente)
     default: electrocasa_dev.bronze.tracking_envios
