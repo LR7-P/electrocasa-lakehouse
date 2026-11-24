@@ -1,0 +1,96 @@
+# Contrato de datos: empleados
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: empleados
+responsable: rrhh
+llegada: archivos CSV de eventos por lote en /Volumes/<catalogo>/default/vol_landing/empleados/
+frecuencia_esperada: por lote; con eventos registrados tarde que llegan en lotes posteriores
+metodo_ingesta: Auto Loader (Streaming Table bronze.empleados_eventos)
+llave: id_empleado + fecha_evento + fecha_registro (evento); id_empleado + version (historia SCD2)
+tabla_bronze: bronze.empleados_eventos
+tabla_silver: silver.empleados_eventos, silver.empleados_historia (SCD2)
+columnas:
+- nombre: id_empleado
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: no nulo (drop)
+- nombre: nombre
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: dni
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: 'sensible: MASK silver.mask_dni; duplicado entre empleados distintos se marca (warn)'
+- nombre: email
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: salario
+  tipo_origen: string
+  tipo: decimal(12,2)
+  nulo: true
+  regla: 'sensible: MASK silver.mask_salario; rango esperado 500 a 30000 (warn)'
+- nombre: sucursal_id
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: se arrastra de la versión anterior si el evento no la trae
+- nombre: cargo
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: tipo_evento
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: 'conjunto cerrado: ALTA, TRANSFERENCIA, CAMBIO_SALARIO, BAJA (cese = BAJA)'
+- nombre: fecha_evento
+  tipo_origen: string
+  tipo: date
+  nulo: false
+  regla: 'no nula (drop): cuándo ocurrió el evento; ordena la historia'
+- nombre: fecha_registro
+  tipo_origen: string
+  tipo: timestamp
+  nulo: true
+  regla: cuándo lo cargó RR.HH.; desempata eventos del mismo día
+historizacion:
+  tipo: SCD Type 2 construido sobre la tabla de eventos (Materialized View)
+  orden: fecha_evento, fecha_registro (nunca current_timestamp())
+  vigencia: '[vigente_desde, vigente_hasta) — vigente_hasta = fecha del siguiente evento; NULL = versión actual'
+  estado: ACTIVO desde ALTA, CESADO desde BAJA, SIN_ALTA si no hubo alta
+reglas_de_calidad:
+- nombre: id_empleado_presente
+  condicion: id_empleado IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: fecha_evento_presente
+  condicion: fecha_evento IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: tipo_evento_valido
+  condicion: tipo_evento IN ('ALTA', 'TRANSFERENCIA', 'CAMBIO_SALARIO', 'BAJA')
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: salario_en_rango
+  condicion: salario_en_rango
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: dni_unico
+  condicion: NOT dni_duplicado
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: dni_presente
+  condicion: dni IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- tipo_evento escrito de 13 formas, incluido 'cese' como sinónimo de baja
+- 'empleados con dos eventos el mismo día: solo fecha_registro dice cuál fue primero'
+- eventos de junio a agosto registrados en octubre que llegan en el lote 3
+- dni vacío en algunas filas
+- mismo dni en dos empleados distintos (error de digitación)
+- fecha_evento vacía en algunas filas
+- salarios con un orden de magnitud fuera de rango

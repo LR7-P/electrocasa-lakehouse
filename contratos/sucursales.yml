@@ -1,0 +1,48 @@
+# Contrato de datos: sucursales
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: sucursales
+responsable: operaciones
+llegada: archivo CSV único en /Volumes/<catalogo>/default/vol_landing/sucursales/
+frecuencia_esperada: referencia; se recarga solo si cambia
+metodo_ingesta: COPY INTO (notebooks/01_copy_into.ipynb)
+llave: sucursal_id
+tabla_bronze: bronze.sucursales
+tabla_silver: silver.sucursales
+columnas:
+- nombre: sucursal_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: 'no nulo (fail): sin él no se puede unir nada'
+- nombre: nombre_sucursal
+  tipo_origen: string
+  tipo: string
+  nulo: false
+- nombre: distrito
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: ciudad
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: casing unificado (Initcap)
+- nombre: region
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: fecha_apertura
+  tipo_origen: string
+  tipo: date
+  nulo: true
+reglas_de_calidad:
+- nombre: sucursal_id_presente
+  condicion: sucursal_id IS NOT NULL
+  politica: fail
+  destino_rechazos: falla el pipeline
+- nombre: ciudad_presente
+  condicion: ciudad IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- ciudad con casing inconsistente en dos filas

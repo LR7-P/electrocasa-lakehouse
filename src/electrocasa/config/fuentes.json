@@ -1,0 +1,65 @@
+{
+  "landing": "/Volumes/{catalogo}/default/vol_landing",
+  "fuentes": [
+    {
+      "nombre": "ventas",
+      "metodo": "auto_loader",
+      "ruta": "ventas",
+      "formato": "csv",
+      "tabla_bronze": "bronze.ventas",
+      "opciones": {"header": "true", "sep": ",", "quote": "\"", "escape": "\"", "mode": "PERMISSIVE"},
+      "schema": "venta_id STRING, sucursal_id STRING, producto_id STRING, vendedor_id STRING, cantidad STRING, monto_total STRING, metodo_pago STRING, fecha_venta STRING, canal STRING",
+      "comentario": "Ventas de tienda física y ecommerce. Llegan por lotes incrementales (mayo, agosto, octubre)."
+    },
+    {
+      "nombre": "devoluciones",
+      "metodo": "auto_loader",
+      "ruta": "devoluciones",
+      "formato": "csv",
+      "tabla_bronze": "bronze.devoluciones",
+      "opciones": {"header": "true", "sep": ",", "quote": "\"", "escape": "\"", "mode": "PERMISSIVE"},
+      "schema": "devolucion_id STRING, venta_id STRING, sucursal_id STRING, producto_id STRING, motivo STRING, monto_reembolso STRING, fecha_devolucion STRING",
+      "comentario": "Devoluciones con la venta de origen. 3 lotes incrementales."
+    },
+    {
+      "nombre": "empleados",
+      "metodo": "auto_loader",
+      "ruta": "empleados",
+      "formato": "csv",
+      "tabla_bronze": "bronze.empleados_eventos",
+      "opciones": {"header": "true", "sep": ",", "quote": "\"", "escape": "\"", "mode": "PERMISSIVE"},
+      "schema": "id_empleado STRING, nombre STRING, dni STRING, email STRING, salario STRING, sucursal_id STRING, cargo STRING, tipo_evento STRING, fecha_evento STRING, fecha_registro STRING",
+      "comentario": "Eventos de RR.HH. (alta, transferencia, cambio de salario, baja). Append de eventos, con llegadas tardías."
+    },
+    {
+      "nombre": "resenas",
+      "metodo": "auto_loader",
+      "ruta": "resenas",
+      "formato": "json",
+      "tabla_bronze": "bronze.resenas",
+      "opciones": {"multiLine": "false"},
+      "schema": "resena_id STRING, producto_id STRING, cliente_id STRING, calificacion STRING, comentario STRING, tags ARRAY<STRING>, respuestas ARRAY<STRUCT<autor: STRING, texto: STRING, fecha: STRING>>, fecha_resena STRING, metadata STRING",
+      "comentario": "Reseñas JSON Lines anidadas. metadata se guarda como texto JSON crudo y se convierte a VARIANT en Silver."
+    },
+    {
+      "nombre": "catalogo",
+      "metodo": "copy_into",
+      "ruta": "catalogo",
+      "formato": "json",
+      "tabla_bronze": "bronze.catalogo",
+      "opciones": {"multiLine": "true", "primitivesAsString": "true"},
+      "columnas": ["producto_id", "nombre_producto", "categoria", "marca", "precio_lista", "activo"],
+      "comentario": "Snapshots completos (marzo y agosto). Cada archivo es un arreglo JSON."
+    },
+    {
+      "nombre": "sucursales",
+      "metodo": "copy_into",
+      "ruta": "sucursales",
+      "formato": "csv",
+      "tabla_bronze": "bronze.sucursales",
+      "opciones": {"header": "true", "sep": ","},
+      "columnas": ["sucursal_id", "nombre_sucursal", "distrito", "ciudad", "region", "fecha_apertura"],
+      "comentario": "Tabla de referencia, archivo único."
+    }
+  ]
+}

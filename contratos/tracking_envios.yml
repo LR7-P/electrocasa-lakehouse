@@ -1,0 +1,77 @@
+# Contrato de datos: tracking_envios
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: tracking_envios
+responsable: logistica_courier
+llegada: Azure SQL Database, tabla dbo.TrackingEnvios
+frecuencia_esperada: continua en origen; ingesta incremental por cursor en cada corrida del job
+metodo_ingesta: Lakeflow Connect, conector query-based de SQL Server (append only), cursor fecha_modificacion, PK evento_id
+llave: evento_id (conector); tracking_id + estado_entrega + fecha_actualizacion (dedup de reprocesados en Silver)
+tabla_bronze: bronze.tracking_envios
+tabla_silver: silver.tracking
+columnas:
+- nombre: evento_id
+  tipo_origen: INT
+  tipo: bigint
+  nulo: false
+  regla: llave primaria del conector
+- nombre: tracking_id
+  tipo_origen: VARCHAR
+  tipo: string
+  nulo: false
+  regla: se repite por diseño (un evento por cambio de estado)
+- nombre: venta_id
+  tipo_origen: VARCHAR
+  tipo: string
+  nulo: true
+  regla: si no existe en ventas se conserva marcado (warn)
+- nombre: courier
+  tipo_origen: VARCHAR
+  tipo: string
+  nulo: false
+  regla: casing unificado (Initcap)
+- nombre: estado_entrega
+  tipo_origen: VARCHAR
+  tipo: string
+  nulo: false
+  regla: 'conjunto cerrado: pendiente, en_transito, entregado, devuelto (drop)'
+- nombre: sucursal_origen
+  tipo_origen: VARCHAR
+  tipo: string
+  nulo: true
+- nombre: fecha_actualizacion
+  tipo_origen: DATE
+  tipo: date
+  nulo: true
+  regla: puede ser nula (warn)
+- nombre: fecha_modificacion
+  tipo_origen: DATETIME2
+  tipo: timestamp
+  nulo: false
+  regla: columna cursor de la ingesta incremental
+reglas_de_calidad:
+- nombre: tracking_id_presente
+  condicion: tracking_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: estado_valido
+  condicion: estado_entrega IN ('pendiente', 'en_transito', 'entregado', 'devuelto')
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: fecha_modificacion_presente
+  condicion: fecha_modificacion IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: venta_existe
+  condicion: venta_existe
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: fecha_actualizacion_presente
+  condicion: fecha_actualizacion IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- courier con casing inconsistente
+- estado_entrega con valores y casing inconsistentes (En camino, EN_CAMINO, en_transito...)
+- 'mensajes reprocesados: el mismo cambio de estado registrado dos veces con distinto evento_id'
+- fecha_actualizacion nula
+- venta_id que no existe en ventas

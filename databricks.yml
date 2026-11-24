@@ -1,0 +1,52 @@
+# Declarative Automation Bundle del proyecto ElectroCasa
+# Despliegue:  databricks bundle validate -t dev
+#              databricks bundle deploy   -t dev
+#              databricks bundle run electrocasa_job -t dev
+bundle:
+  name: electrocasa-lakehouse
+
+include:
+  - resources/*.yml
+
+variables:
+  catalogo:
+    description: Catálogo de Unity Catalog del target (un catálogo por ambiente)
+    default: electrocasa_dev
+  email_alertas:
+    description: Correo que recibe las alertas de fallo y éxito del job
+    default: CAMBIAR_POR_TU_CORREO@ejemplo.com
+  tracking_pipeline_id:
+    description: ID de la pipeline de ingesta de Tracking (conector query-based de SQL Server creado en la UI)
+    default: CAMBIAR_POR_ID_PIPELINE_TRACKING
+  tracking_tabla:
+    description: Tabla destino del conector de Tracking (Bronze de esa fuente)
+    default: electrocasa_dev.bronze.tracking_envios
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace:
+    #   host: https://<tu-workspace>.cloud.databricks.com
+    presets:
+      # En modo development los triggers quedan pausados por defecto: aquí se activan
+      trigger_pause_status: UNPAUSED
+    variables:
+      catalogo: electrocasa_dev
+      tracking_tabla: electrocasa_dev.bronze.tracking_envios
+
+  prod:
+    mode: production
+    # workspace:
+    #   host: https://<tu-workspace>.cloud.databricks.com
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    run_as:
+      user_name: ${workspace.current_user.userName}
+    presets:
+      # En Free Edition prod queda pausado para no gastar la cuota diaria
+      trigger_pause_status: PAUSED
+    variables:
+      catalogo: electrocasa_prod
+      # En prod se crearía una segunda ingesta del conector con destino electrocasa_prod
+      tracking_tabla: electrocasa_prod.bronze.tracking_envios

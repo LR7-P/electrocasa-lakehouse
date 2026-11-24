@@ -1,0 +1,85 @@
+# Contrato de datos: resenas
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: resenas
+responsable: atencion_al_cliente
+llegada: archivos JSON Lines por lote en /Volumes/<catalogo>/default/vol_landing/resenas/
+frecuencia_esperada: por lote (al 31-jul y 31-oct)
+metodo_ingesta: Auto Loader (Streaming Table bronze.resenas) con schema explícito
+llave: resena_id
+tabla_bronze: bronze.resenas
+tabla_silver: silver.resenas
+columnas:
+- nombre: resena_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: no nulo; único en Silver
+- nombre: producto_id
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: si no existe en el catálogo se conserva marcado (warn) y P5 lo excluye
+- nombre: cliente_id
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: calificacion
+  tipo_origen: number
+  tipo: int
+  nulo: false
+  regla: entero entre 1 y 5 (drop)
+- nombre: comentario
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: vacío -> NULL (warn)
+- nombre: tags
+  tipo_origen: array<string>
+  tipo: array<string>
+  nulo: false
+  regla: nulo -> arreglo vacío
+- nombre: respuestas
+  tipo_origen: array<struct>
+  tipo: array<struct<autor:string, texto:string, fecha:timestamp>>
+  nulo: true
+  regla: autor faltante -> 'sin_autor'
+- nombre: fecha_resena
+  tipo_origen: string
+  tipo: date
+  nulo: false
+  regla: dos formatos de origen -> DATE
+- nombre: metadata
+  tipo_origen: object (texto JSON en Bronze)
+  tipo: variant
+  nulo: true
+  regla: estructura distinta según origen (app, web, kiosko)
+reglas_de_calidad:
+- nombre: resena_id_presente
+  condicion: resena_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: calificacion_valida
+  condicion: calificacion IS NOT NULL AND calificacion BETWEEN 1 AND 5
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: fecha_resena_valida
+  condicion: fecha_resena IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: producto_en_catalogo
+  condicion: producto_en_catalogo
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: comentario_presente
+  condicion: comentario IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- calificacion fuera de la escala de 1 a 5 (0, 6 o nula)
+- comentario nulo o vacío
+- tags nulo en vez de arreglo vacío
+- respuestas sin autor
+- producto_id que no existe en el catálogo
+- fecha_resena en dos formatos
+- reseñas del lote 1 que se repiten en el lote 2
+- metadata con estructura distinta según el origen

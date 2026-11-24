@@ -1,0 +1,88 @@
+# Contrato de datos: devoluciones
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: devoluciones
+responsable: area_comercial_postventa
+llegada: archivos CSV por lote en /Volumes/<catalogo>/default/vol_landing/devoluciones/
+frecuencia_esperada: por lote (3 lotes)
+metodo_ingesta: Auto Loader (Streaming Table bronze.devoluciones)
+llave: devolucion_id
+tabla_bronze: bronze.devoluciones
+tabla_silver: silver.devoluciones
+columnas:
+- nombre: devolucion_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: no nulo; único en Silver
+- nombre: venta_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: debe existir en silver.ventas (drop)
+- nombre: sucursal_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: si viene vacía se toma de la venta de origen
+- nombre: producto_id
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: si viene vacío se toma de la venta de origen
+- nombre: motivo
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: vacío -> NULL (warn)
+- nombre: monto_reembolso
+  tipo_origen: string
+  tipo: decimal(12,2)
+  nulo: false
+  regla: no negativo y no mayor que monto_total de la venta (drop)
+- nombre: fecha_devolucion
+  tipo_origen: string
+  tipo: date
+  nulo: false
+- nombre: monto_venta
+  tipo_origen: derivada
+  tipo: decimal(12,2)
+  nulo: true
+  descripcion: monto de la venta de origen (join en la vista)
+- nombre: venta_existe
+  tipo_origen: derivada
+  tipo: boolean
+  nulo: false
+reglas_de_calidad:
+- nombre: devolucion_id_presente
+  condicion: devolucion_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: venta_existe
+  condicion: venta_existe
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: reembolso_valido
+  condicion: monto_reembolso IS NOT NULL AND monto_reembolso >= 0 AND monto_reembolso <= monto_venta
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: fecha_devolucion_valida
+  condicion: fecha_devolucion IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: sucursal_presente
+  condicion: sucursal_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: motivo_presente
+  condicion: motivo IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: producto_en_catalogo
+  condicion: producto_en_catalogo
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- monto_reembolso negativo o mayor que el monto de la venta de origen
+- motivo vacío
+- venta_id vacío o que no existe en ventas
+- devoluciones del lote anterior repetidas

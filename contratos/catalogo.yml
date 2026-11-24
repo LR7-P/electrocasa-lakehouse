@@ -1,0 +1,75 @@
+# Contrato de datos: catalogo
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: catalogo
+responsable: area_comercial_producto
+llegada: snapshots JSON completos (arreglo) en /Volumes/<catalogo>/default/vol_landing/catalogo/
+frecuencia_esperada: snapshot completo periódico (1-mar y 1-ago)
+metodo_ingesta: COPY INTO (notebooks/01_copy_into.ipynb) con multiLine y primitivesAsString
+llave: producto_id + snapshot_archivo (silver.catalogo); producto_id (silver.catalogo_actual)
+tabla_bronze: bronze.catalogo
+tabla_silver: silver.catalogo, silver.catalogo_actual
+columnas:
+- nombre: producto_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: no nulo; una vez por snapshot
+- nombre: nombre_producto
+  tipo_origen: string
+  tipo: string
+  nulo: true
+- nombre: categoria
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: 'conjunto cerrado: linea_blanca, cocina, electronica, climatizacion, entretenimiento'
+- nombre: marca
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: puede venir nula (warn)
+- nombre: precio_lista
+  tipo_origen: number o string
+  tipo: decimal(12,2)
+  nulo: true
+  regla: numérico y mayor a 0 (warn); 'S/ 1,299.90' -> 1299.90
+- nombre: activo
+  tipo_origen: boolean
+  tipo: boolean
+  nulo: false
+  regla: false = descontinuado; se conserva marcado
+- nombre: snapshot_archivo
+  tipo_origen: derivada
+  tipo: string
+  nulo: false
+  descripcion: archivo del snapshot
+- nombre: snapshot_ts
+  tipo_origen: derivada
+  tipo: timestamp
+  nulo: false
+  descripcion: orden de los snapshots (momento de carga del archivo)
+reglas_de_calidad:
+- nombre: producto_id_presente
+  condicion: producto_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: precio_valido
+  condicion: precio_lista IS NOT NULL AND precio_lista > 0
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: categoria_valida
+  condicion: categoria IS NOT NULL AND categoria <> 'otra'
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: marca_presente
+  condicion: marca IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- precio_lista como texto con moneda ("S/ 1,299.90"), negativo, cero o nulo
+- marca nula
+- categoria con 17 variantes de escritura para 5 categorías
+- 'en el snapshot de marzo algunos productos aparecen dos veces con precios distintos (queda uno: precio válido y mayor)'
+- 'agosto trae productos nuevos, cambios de precio y descontinuados (activo: false)'
+- 'cada archivo es un único arreglo JSON: requiere multiLine; activo llega como booleano y precio como número o texto (primitivesAsString
+  evita DELTA_FAILED_TO_MERGE_FIELDS)'

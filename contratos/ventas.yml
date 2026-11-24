@@ -1,0 +1,107 @@
+# Contrato de datos: ventas
+# Las reglas se generan desde src/electrocasa/utils/reglas.py (mismo código del pipeline).
+fuente: ventas
+responsable: area_comercial
+llegada: archivos CSV por lote en /Volumes/<catalogo>/default/vol_landing/ventas/
+frecuencia_esperada: por lote (al 31-may, 31-ago y 31-oct); en producción mensual
+metodo_ingesta: Auto Loader (Streaming Table bronze.ventas dentro del pipeline)
+llave: venta_id
+tabla_bronze: bronze.ventas
+tabla_silver: silver.ventas
+columnas:
+- nombre: venta_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: no nulo; único en Silver (dedup por llegada)
+- nombre: sucursal_id
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: en mayúsculas; en ecommerce = sucursal que despachó
+- nombre: producto_id
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: si no existe en el catálogo se conserva con producto_en_catalogo = false (warn)
+- nombre: vendedor_id
+  tipo_origen: string
+  tipo: string
+  nulo: true
+  regla: obligatorio solo en tienda_fisica (warn); vacío en ecommerce
+- nombre: cantidad
+  tipo_origen: string
+  tipo: int
+  nulo: false
+  regla: mayor a 0
+- nombre: monto_total
+  tipo_origen: string
+  tipo: decimal(12,2)
+  nulo: false
+  regla: mayor a 0, después de normalizar '1.234,50' -> 1234.50
+- nombre: metodo_pago
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: 'conjunto cerrado: efectivo, tarjeta, yape, plin, transferencia'
+- nombre: fecha_venta
+  tipo_origen: string
+  tipo: date
+  nulo: false
+  regla: formatos de origen yyyy-MM-dd, dd/MM/yyyy, yyyy-MM-ddTHH:mm:ss -> DATE
+- nombre: canal
+  tipo_origen: string
+  tipo: string
+  nulo: false
+  regla: 'conjunto cerrado: tienda_fisica, ecommerce'
+- nombre: producto_en_catalogo
+  tipo_origen: derivada
+  tipo: boolean
+  nulo: false
+  descripcion: columna derivada en Silver
+reglas_de_calidad:
+- nombre: venta_id_presente
+  condicion: venta_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: fecha_venta_valida
+  condicion: fecha_venta IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: sucursal_presente
+  condicion: sucursal_id IS NOT NULL
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: monto_positivo
+  condicion: monto_total IS NOT NULL AND monto_total > 0
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: cantidad_positiva
+  condicion: cantidad IS NOT NULL AND cantidad > 0
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: canal_valido
+  condicion: canal IN ('tienda_fisica', 'ecommerce')
+  politica: drop
+  destino_rechazos: silver.cuarentena
+- nombre: producto_en_catalogo
+  condicion: producto_en_catalogo
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: metodo_pago_conocido
+  condicion: metodo_pago IS NOT NULL AND metodo_pago <> 'otro'
+  politica: warn
+  destino_rechazos: silver.cuarentena
+- nombre: vendedor_en_tienda_fisica
+  condicion: canal <> 'tienda_fisica' OR vendedor_id IS NOT NULL
+  politica: warn
+  destino_rechazos: silver.cuarentena
+problemas_conocidos:
+- metodo_pago con 17 formas de escribir 5 métodos (tarjeta, TC, td, EFV, Yape...)
+- monto_total vacío, negativo o cero
+- monto_total con coma decimal y punto de miles (1.234,50)
+- cantidad en cero
+- sucursal_id vacío
+- fecha_venta en tres formatos (2026-06-07, 07/06/2026, 2026-06-07T14:30:00)
+- producto_id que no existe en el catálogo
+- ventas de un lote que vuelven a llegar, idénticas, en el lote siguiente (se deduplican por venta_id)

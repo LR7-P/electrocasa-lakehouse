@@ -1,0 +1,17 @@
+# Pipeline principal: Lakeflow Spark Declarative Pipelines (Bronze Auto Loader + Silver + Gold)
+resources:
+  pipelines:
+    electrocasa_pipeline:
+      name: electrocasa_pipeline_${bundle.target}
+      catalog: ${var.catalogo}
+      schema: silver            # schema por defecto; las tablas se publican como bronze.x, silver.x, gold.x
+      serverless: true          # Free Edition solo tiene serverless; corre por lotes, no continuo
+      continuous: false
+      channel: CURRENT
+      root_path: ../src/electrocasa   # se agrega al sys.path: permite "from utils import ..."
+      libraries:
+        - glob:
+            include: ../src/electrocasa/transformations/**
+      configuration:
+        catalogo: ${var.catalogo}
+        tracking_tabla: ${var.tracking_tabla}
