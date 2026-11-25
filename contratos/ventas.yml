@@ -97,7 +97,7 @@ reglas_de_calidad:
   politica: warn
   destino_rechazos: silver.cuarentena
 problemas_conocidos:
-- metodo_pago con 17 formas de escribir 5 métodos (tarjeta, TC, td, EFV, Yape...)
+- metodo_pago con 17 formas de escribir 5 métodos (tarjeta, TC, td, EFV, Yape, TRF...); TRF = transferencia (descubierto en el lote 1)
 - monto_total vacío, negativo o cero
 - monto_total con coma decimal y punto de miles (1.234,50)
 - cantidad en cero

@@ -10,7 +10,7 @@ from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 
 from utils.calidad import con_expectativas
-from utils.normalizacion import ESTADOS_ENTREGA, id_limpio, mapear, texto_limpio
+from utils.normalizacion import COURIERS, ESTADOS_ENTREGA, id_limpio, mapear, texto_limpio
 
 spark = SparkSession.getActiveSession()
 TRACKING_TABLA = spark.conf.get("tracking_tabla")
@@ -23,7 +23,11 @@ def tracking_preparada():
         F.col("evento_id").cast("bigint").alias("evento_id"),
         id_limpio("tracking_id").alias("tracking_id"),
         id_limpio("venta_id").alias("venta_id"),
-        F.initcap(F.lower(F.regexp_replace(texto_limpio("courier"), r"\s+", " "))).alias("courier"),
+        # Conjunto cerrado de couriers; uno nuevo no mapeado conserva su nombre con casing unificado
+        F.coalesce(
+            mapear("courier", COURIERS, None),
+            F.initcap(F.lower(F.regexp_replace(texto_limpio("courier"), r"\s+", " "))),
+        ).alias("courier"),
         texto_limpio("courier").alias("courier_original"),
         mapear("estado_entrega", ESTADOS_ENTREGA, "desconocido").alias("estado_entrega"),
         texto_limpio("estado_entrega").alias("estado_entrega_original"),

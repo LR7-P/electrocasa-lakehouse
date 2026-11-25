@@ -28,7 +28,7 @@ columnas:
   tipo_origen: VARCHAR
   tipo: string
   nulo: false
-  regla: casing unificado (Initcap)
+  regla: 'conjunto cerrado: Olva Courier (incluye Olva), Shalom, Servientrega'
 - nombre: estado_entrega
   tipo_origen: VARCHAR
   tipo: string
@@ -70,7 +70,7 @@ reglas_de_calidad:
   politica: warn
   destino_rechazos: silver.cuarentena
 problemas_conocidos:
-- courier con casing inconsistente
+- courier con casing inconsistente y la variante 'Olva' para 'Olva Courier' (descubierta en la exploración)
 - estado_entrega con valores y casing inconsistentes (En camino, EN_CAMINO, en_transito...)
 - 'mensajes reprocesados: el mismo cambio de estado registrado dos veces con distinto evento_id'
 - fecha_actualizacion nula

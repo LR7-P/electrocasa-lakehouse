@@ -238,18 +238,19 @@ def despachos_courier():
 
 
 # ------------------------------------------------- Extra: VARIANT en reseñas
-# Revisa las llaves reales con:  SELECT schema_of_variant_agg(metadata) FROM silver.resenas
+# Estructura real de metadata (schema_of_variant_agg):
+#   OBJECT<app: OBJECT<so, version>, campania: OBJECT<codigo, cupon_usado>,
+#          kiosko_id, navegador, origen, sucursal_id>
 @dp.materialized_view(
     name="gold.resenas_negativas_por_origen",
-    comment="Extra VARIANT: % de reseñas negativas por origen (app/web/kiosko) leído de metadata.",
+    comment="Extra VARIANT: % de reseñas negativas por origen (app/web/tienda) y versión/SO de la app, leídos de metadata.",
     table_properties=PROPS,
 )
 def resenas_negativas_por_origen():
     return spark.sql(f"""
-        SELECT coalesce(metadata:origen::string, metadata:source::string,
-                        metadata:canal::string, metadata:plataforma::string, 'desconocido') AS origen,
-               coalesce(metadata:version_app::string, metadata:app_version::string,
-                        metadata:version::string) AS version_app,
+        SELECT coalesce(metadata:origen::string, 'desconocido') AS origen,
+               metadata:app.so::string                         AS app_so,
+               metadata:app.version::string                    AS version_app,
                COUNT(*) AS total_resenas,
                SUM(CASE WHEN calificacion <= 2 THEN 1 ELSE 0 END) AS resenas_negativas,
                CAST(100.0 * SUM(CASE WHEN calificacion <= 2 THEN 1 ELSE 0 END) / COUNT(*) AS DECIMAL(6,2))

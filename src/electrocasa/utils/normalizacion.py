@@ -43,6 +43,13 @@ ESTADOS_ENTREGA = [
     (r"(pend|registr|cread|prepar)", "pendiente"),
 ]
 
+# Couriers: "Olva" y "Olva Courier" son el mismo courier (descubierto en la exploración)
+COURIERS = [
+    (r"olva", "Olva Courier"),
+    (r"shalom", "Shalom"),
+    (r"servientrega", "Servientrega"),
+]
+
 CANALES = [
     (r"(ecom|e com|online|web|digital|app)", "ecommerce"),
     (r"(tienda|fisic|presencial|store|local)", "tienda_fisica"),
@@ -57,13 +64,15 @@ def _texto_normalizado_sql(col_sql: str) -> str:
     ).format(c=col_sql)
 
 
-def mapear(col_sql: str, reglas: list[tuple[str, str]], por_defecto: str) -> Column:
-    """Mapea las variantes de escritura a un conjunto cerrado de valores."""
+def mapear(col_sql: str, reglas: list[tuple[str, str]], por_defecto: str | None) -> Column:
+    """Mapea las variantes de escritura a un conjunto cerrado de valores.
+    por_defecto=None deja NULL cuando ningún patrón coincide."""
     n = _texto_normalizado_sql(col_sql)
     casos = " ".join(f"WHEN {n} RLIKE '{patron}' THEN '{valor}'" for patron, valor in reglas)
+    otro = "NULL" if por_defecto is None else f"'{por_defecto}'"
     return F.expr(
         f"CASE WHEN nullif(trim(CAST({col_sql} AS STRING)), '') IS NULL THEN NULL "
-        f"{casos} ELSE '{por_defecto}' END"
+        f"{casos} ELSE {otro} END"
     )
 
 

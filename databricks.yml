@@ -1,3 +1,7 @@
+# Declarative Automation Bundle del proyecto ElectroCasa
+# Despliegue:  databricks bundle validate -t dev
+#              databricks bundle deploy   -t dev
+#              databricks bundle run electrocasa_job -t dev
 bundle:
   name: electrocasa-lakehouse
 
@@ -25,18 +29,26 @@ targets:
   dev:
     mode: development
     default: true
+    # workspace:
+    #   host: https://<tu-workspace>.cloud.databricks.com
     variables:
       catalogo: electrocasa_dev
+      # En modo development los triggers quedan pausados salvo que el job declare
+      # pause_status explícito: el trigger por llegada de archivo se activa aquí
       trigger_pausa: UNPAUSED
       tracking_tabla: electrocasa_dev.bronze.tracking_envios
 
   prod:
     mode: production
+    # workspace:
+    #   host: https://<tu-workspace>.cloud.databricks.com
     workspace:
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
     run_as:
       user_name: ${workspace.current_user.userName}
     variables:
       catalogo: electrocasa_prod
+      # En Free Edition prod queda pausado para no gastar la cuota diaria
       trigger_pausa: PAUSED
+      # En prod se crearía una segunda ingesta del conector con destino electrocasa_prod
       tracking_tabla: electrocasa_prod.bronze.tracking_envios

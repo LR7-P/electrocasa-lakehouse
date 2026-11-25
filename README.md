@@ -137,16 +137,39 @@ electrocasa-lakehouse/
 3. Ingesta query-based: tabla `dbo.TrackingEnvios`, **cursor `fecha_modificacion`**, **PK `evento_id`** (no `tracking_id`, que se repite por diseño), destino `electrocasa_dev.bronze.tracking_envios`, columnas seleccionadas: `evento_id, tracking_id, venta_id, courier, estado_entrega, sucursal_origen, fecha_actualizacion, fecha_modificacion`.
 4. **Modo de historia: append only.** Cada fila es un evento inmutable; no hay nada que actualizar. Append conserva todos los eventos (incluidos los reprocesados) tal como llegaron, y la deduplicación se hace en Silver, donde es visible y auditable.
 
-**Evidencia de las dos corridas** (`DESCRIBE HISTORY electrocasa_dev.bronze.tracking_envios`):
+**Evidencia de las dos corridas** de la pipeline `ingesta_tracking_envios` (Ingestion pipeline, update mode *Triggered*):
 
-| Corrida | Operación | Filas |
-|---|---|---|
-| 1 (carga inicial) | `<completar>` | `<completar: 15.139>` |
-| 2 (sin cambios) | sin versión nueva | 0 |
+| Corrida | Inicio | Duración de la tabla | Output records `tracking_envios` |
+|---|---|---|---|
+| 1 (carga inicial) | 24-nov-2026 16:45 | 4m 21s | **15K** (15.139 eventos) |
+| 2 (sin cambios en la tabla) | 24-nov-2026 17:02 | 7s | **— (0 filas)** |
+
+La segunda corrida no vuelve a traer filas: el conector guarda el último valor de `fecha_modificacion` leído y solo consulta los registros con un valor mayor. Eso demuestra que la ingesta es **incremental por cursor** y no una recarga completa.
+
+**Corrida 1:** carga inicial
 
 ![Primera corrida del conector](img/tracking_corrida1.png)
+
+**Corrida 2:** sin filas nuevas
+
 ![Segunda corrida del conector](img/tracking_corrida2.png)
-![DESCRIBE HISTORY](img/tracking_history.png)
+
+`DESCRIBE HISTORY electrocasa_dev.bronze.tracking_envios` y conteo de la tabla:
+
+| version | timestamp (UTC) | operation |
+|---|---|---|
+| 2 | 2026-11-24 21:50:14 | **STREAMING UPDATE**: carga inicial de los 15.139 eventos (corrida 1) |
+| 1 | 2026-11-24 21:45:51 | DLT SETUP |
+| 0 | 2026-11-24 21:45:49 | CREATE TABLE |
+
+```
+SELECT count(*) AS eventos FROM electrocasa_dev.bronze.tracking_envios;  -->  15139
+```
+
+- La **corrida 2** (22:02 UTC) **no generó ninguna versión nueva**: la última sigue siendo la 2. La tabla mantiene los 15.139 eventos, sin duplicados.
+- La operación de la carga es `STREAMING UPDATE` y no `MERGE`, lo que confirma que el conector quedó en modo **append only**.
+
+![DESCRIBE HISTORY y conteo](img/tracking_history.png)
 
 ---
 
@@ -159,7 +182,7 @@ Silver se implementa con **Materialized Views** sobre Bronze. Al recalcularse co
 | Fechas en varios formatos → `DATE`/`TIMESTAMP` | `coalesce` de `try_to_timestamp` con cada formato (no falla con ANSI) |
 | `1.234,50` y `S/ 1,299.90` → `DECIMAL(12,2)` | detección de coma decimal vs. coma de miles (`utils/normalizacion.py`) |
 | Métodos de pago, categorías, tipos de evento, estados, canal | mapeo por expresión regular a conjuntos cerrados |
-| Courier | casing unificado (`initcap`) |
+| Courier | conjunto cerrado: `Olva Courier` (incluye "Olva"), `Shalom` y `Servientrega` |
 | `ciudad` en sucursales | `initcap(lower(trim))` |
 | Reingestas | ventas por `venta_id`, devoluciones por `devolucion_id`, reseñas por `resena_id` (queda la primera que llegó) |
 | Productos repetidos en marzo | uno por producto y snapshot (precio válido y mayor) |
@@ -202,6 +225,18 @@ Implementado **armando los intervalos sobre la tabla de eventos** (`silver.emple
 - `estado`: `ACTIVO` desde un ALTA, `CESADO` desde una BAJA/cese, `SIN_ALTA` si no hay alta.
 - **Eventos tardíos:** como la vista se recalcula con todos los eventos, un evento de junio que llega en el lote 3 se ubica en su lugar y reabre/cierra los intervalos correctos.
 - **Por qué no `AUTO CDC`:** con eventos tardíos y empates en el mismo día, la historia completa recalculada es determinista y fácil de auditar; el orden sale igual de los datos de la fuente.
+
+**Evidencia: empleado con eventos tardíos** (`EMP-00286`, salida de `03_monitoreo`, sección 7):
+
+| versión | tipo_evento | sucursal | fecha_evento | fecha_registro | vigente_desde | vigente_hasta | actual |
+|---|---|---|---|---|---|---|---|
+| 1 | ALTA | S04 | 2024-10-26 | 2026-03-01 | 2024-10-26 | 2026-04-20 | no |
+| 2 | TRANSFERENCIA | S32 | 2026-04-20 | 2026-04-24 | 2026-04-20 | 2026-06-08 | no |
+| 3 | TRANSFERENCIA | S39 | 2026-06-08 | 2026-06-08 | 2026-06-08 | 2026-08-24 | no |
+| 4 | TRANSFERENCIA | **S06** | **2026-08-24** | **2026-10-11** | 2026-08-24 | 2026-09-25 | no |
+| 5 | TRANSFERENCIA | S22 | 2026-09-25 | 2026-09-27 | 2026-09-25 | — | **sí** |
+
+La transferencia a S06 del 24-ago la cargó RR.HH. el 11-oct y llegó en el **lote 3**. Aun así quedó como versión 4, **entre** la de junio y la de septiembre, y cerró correctamente el intervalo anterior. Con eso, al cierre de agosto (P3) este empleado cuenta en S06, no en S39.
 
 Uso en Gold: un empleado está activo en la fecha *d* si `estado = 'ACTIVO' AND vigente_desde <= d AND (vigente_hasta IS NULL OR vigente_hasta > d)`. Una baja en *d* lo deja inactivo ese día. En P4, si no hay versión activa en la fecha de la venta → `SIN_ASIGNAR`.
 
@@ -247,8 +282,10 @@ Las siete tablas Gold se calculan sobre Silver, filtrando el período 2026-03-01
 | `pipeline_principal` | pipeline | ambas anteriores | 1 |
 | `validacion` | notebook | `pipeline_principal` | 0 (si falla es que hay un problema real de datos) |
 
-- **Trigger: llegada de archivo** sobre `/Volumes/<catalogo>/default/vol_landing/`. Los lotes llegan sin calendario fijo; correr por horario gastaría cuota sin datos nuevos. `min_time_between_triggers_seconds: 300` y `wait_after_last_change_seconds: 120` agrupan los archivos de un mismo lote en una corrida. En `prod` el trigger queda pausado (`presets.trigger_pause_status: PAUSED`) para no consumir la cuota de Free Edition.
-- **Alertas:** correo en fallo y en éxito (`email_alertas`).
+- **Trigger: llegada de archivo** sobre `/Volumes/<catalogo>/default/vol_landing/`. Los lotes llegan sin calendario fijo; correr por horario gastaría cuota sin datos nuevos. `min_time_between_triggers_seconds: 300` y `wait_after_last_change_seconds: 120` agrupan los archivos de un mismo lote en una corrida. El estado del trigger se controla con la variable `trigger_pausa` (`pause_status` explícito en el job): `UNPAUSED` en `dev` y `PAUSED` en `prod` para no consumir la cuota de Free Edition.
+- **Alertas:** correo en fallo y en éxito (`email_alertas`). Evidencia: correo recibido tras la corrida del lote 1 (run `3120155628384`, *Succeeded*):
+
+  ![alerta por correo](img/alerta_email.png)
 - `max_concurrent_runs: 1`: nunca dos pipelines a la vez.
 
 ### Compute
@@ -273,25 +310,80 @@ Las siete tablas Gold se calculan sobre Silver, filtrando el período 2026-03-01
 | `electrocasa_analistas` | `USE CATALOG`; `USE SCHEMA, SELECT` en gold |
 | `electrocasa_auditoria` | `USE CATALOG`; `USE SCHEMA, SELECT` en gold; system tables (ver abajo) |
 
-**Demostración de REVOKE** (`SELECT` sobre silver a analistas):
-
-| Momento | Evidencia |
-|---|---|
-| Antes | ![antes](img/revoke_1_antes.png) |
-| Después del GRANT indebido | ![grant](img/revoke_2_grant.png) |
-| Después del REVOKE | ![revoke](img/revoke_3_despues.png) |
-
-**Auditoría y tablas de sistema.** Error obtenido al otorgar `system.access` en Free Edition:
+**GRANT ejecutados contra los tres grupos** (salida de `00_setup`, sección 3, catálogo `electrocasa_dev`). Ninguno falló con `PRINCIPAL_DOES_NOT_EXIST`: Unity Catalog reconoce los grupos creados desde Settings.
 
 ```
-<pegar aquí el error que muestra la celda 5 de 00_setup>
+OK  GRANT USE CATALOG ON CATALOG electrocasa_dev TO `electrocasa_ingenieria`
+OK  GRANT USE SCHEMA, SELECT, MODIFY, CREATE TABLE, CREATE MATERIALIZED VIEW, CREATE FUNCTION, EXECUTE ON SCHEMA electrocasa_dev.bronze TO `electrocasa_ingenieria`
+OK  GRANT USE SCHEMA, SELECT, MODIFY, CREATE TABLE, CREATE MATERIALIZED VIEW, CREATE FUNCTION, EXECUTE ON SCHEMA electrocasa_dev.silver TO `electrocasa_ingenieria`
+OK  GRANT USE SCHEMA, SELECT, MODIFY, CREATE TABLE, CREATE MATERIALIZED VIEW, CREATE FUNCTION, EXECUTE ON SCHEMA electrocasa_dev.gold TO `electrocasa_ingenieria`
+OK  GRANT USE SCHEMA ON SCHEMA electrocasa_dev.default TO `electrocasa_ingenieria`
+OK  GRANT READ VOLUME, WRITE VOLUME ON VOLUME electrocasa_dev.default.vol_landing TO `electrocasa_ingenieria`
+OK  GRANT USE CATALOG ON CATALOG electrocasa_dev TO `electrocasa_analistas`
+OK  GRANT USE SCHEMA, SELECT ON SCHEMA electrocasa_dev.gold TO `electrocasa_analistas`
+OK  GRANT USE CATALOG ON CATALOG electrocasa_dev TO `electrocasa_auditoria`
+OK  GRANT USE SCHEMA, SELECT ON SCHEMA electrocasa_dev.gold TO `electrocasa_auditoria`
 ```
 
-Alternativa usada: pestaña **Lineage** de Catalog Explorer → ![lineage](img/lineage.png)
+**Membresía del dueño del pipeline.** El usuario que despliega y es dueño del pipeline pertenece a `electrocasa_ingenieria` (y no a los otros dos grupos), y la máscara le devuelve el DNI completo:
+
+![membresía y prueba de máscara](img/membresia_grupos.png)
+
+**Demostración de REVOKE.** Se otorgó a `electrocasa_analistas` un privilegio que no le corresponde (`USE SCHEMA` + `SELECT` sobre `electrocasa_dev.silver`), se verificó y se revocó:
+
+1. **Antes:** `SHOW GRANTS` sin filas. Analistas no tiene acceso a silver.
+
+   ![antes](img/revoke_1_antes.png)
+
+2. **Después del GRANT indebido:** aparecen `SELECT` y `USE SCHEMA` sobre `electrocasa_dev.silver`.
+
+   ![grant](img/revoke_2_grant.png)
+
+3. **Después del REVOKE:** `SHOW GRANTS` vuelve a no devolver filas.
+
+   ![revoke](img/revoke_3_despues.png)
+
+**Auditoría y tablas de sistema.** Se intentó otorgar a `electrocasa_auditoria` `USE CATALOG` sobre `system`, `USE SCHEMA` sobre `system.access` y `SELECT` sobre `audit`, `table_lineage` y `column_lineage` (`00_setup`, sección 5). En Free Edition los cinco `GRANT` fallan porque ni el administrador del workspace tiene `MANAGE` sobre el catálogo `system`:
+
+```
+ERROR  GRANT USE CATALOG ON CATALOG system TO `electrocasa_auditoria`
+       (com.databricks.sql.managedcatalog.acl.UnauthorizedAccessException) PERMISSION_DENIED: User does not have MANAGE on Catalog 'system'.
+ERROR  GRANT USE SCHEMA ON SCHEMA system.access TO `electrocasa_auditoria`
+       (com.databricks.sql.managedcatalog.acl.UnauthorizedAccessException) PERMISSION_DENIED: User does not have MANAGE on Schema 'system.access'.
+ERROR  GRANT SELECT ON TABLE system.access.audit TO `electrocasa_auditoria`
+       (com.databricks.sql.managedcatalog.acl.UnauthorizedAccessException) PERMISSION_DENIED: User does not have MANAGE on Table 'system.access.audit'.
+ERROR  GRANT SELECT ON TABLE system.access.table_lineage TO `electrocasa_auditoria`
+       (com.databricks.sql.managedcatalog.acl.UnauthorizedAccessException) PERMISSION_DENIED: User does not have MANAGE on Table 'system.access.table_lineage'.
+ERROR  GRANT SELECT ON TABLE system.access.column_lineage TO `electrocasa_auditoria`
+       (com.databricks.sql.managedcatalog.acl.UnauthorizedAccessException) PERMISSION_DENIED: User does not have MANAGE on Table 'system.access.column_lineage'.
+```
+
+**Alternativa usada:** como evidencia de auditoría y lineage, el grupo `electrocasa_auditoria` tiene `SELECT` sobre gold, y el lineage de las tablas se documenta con la pestaña **Lineage** de Catalog Explorer, que muestra el recorrido Bronze → Silver → Gold:
+
+![lineage](img/lineage.png)
+
+El grafo de `gold.ventas_netas_sucursal_mes` muestra sus tres orígenes en Silver (`silver.sucursales`, `silver.ventas` y `silver.devoluciones`, todas materialized views del pipeline), el pipeline que las conecta y sus consumidores. Cada nodo indica el dueño (`riospalermo@gmail.com`) y las columnas, de modo que Auditoría puede rastrear cualquier cifra de Gold hasta su tabla de origen.
 
 **Masking.** `dni` y `salario` llevan `MASK` declarado en el schema de las tablas del pipeline (`silver.empleados_eventos`, `silver.empleados_historia`, `gold.empleados_vista`). Las funciones `silver.mask_dni` y `silver.mask_salario` usan `is_account_group_member('electrocasa_ingenieria')`. El dueño del pipeline es miembro de `electrocasa_ingenieria`, por eso la tabla derivada `gold.empleados_vista` conserva los valores reales para ese grupo y se enmascara para el resto:
 
-![masking ingenieria](img/masking_ingenieria.png)
+Evidencia (`03_monitoreo`, sección 6), consultada por `riospalermo@gmail.com` con `en_ingenieria = true`:
+
+```
+silver.empleados_historia  ->  EMP-00001 | Gabriela Mamani | dni 22108722 | salario 2269.90 | S37
+gold.empleados_vista       ->  EMP-00004 | Daniela Gutierrez | dni 48867538 | salario 1532.42 | S19
+```
+
+`DESCRIBE TABLE EXTENDED electrocasa_dev.gold.empleados_vista` muestra las máscaras declaradas en el pipeline:
+
+```
+# Column Masks
+dni       `electrocasa_dev`.`silver`.`mask_dni`
+salario   `electrocasa_dev`.`silver`.`mask_salario`
+Type      MATERIALIZED_VIEW
+Owner     riospalermo@gmail.com
+```
+
+La tabla derivada de Gold conserva los valores reales para el grupo de ingeniería porque el dueño del pipeline pertenece a ese grupo. Para cualquier usuario fuera de `electrocasa_ingenieria`, `mask_dni` devuelve `*****722` y `mask_salario` devuelve `NULL`, como se ve en la prueba de la función en `00_setup`.
 
 > Si no se hubieran podido crear los grupos, la función compararía con `current_user() = '<correo>'` (ver comentario en `00_setup`).
 
@@ -300,7 +392,7 @@ Alternativa usada: pestaña **Lineage** de Catalog Explorer → ![lineage](img/l
 ## 8. CI/CD (Declarative Automation Bundle)
 
 - `databricks.yml` en la raíz; recursos en `resources/`.
-- Targets: **`dev`** (`electrocasa_dev`, modo development, trigger activo) y **`prod`** (`electrocasa_prod`, modo production, trigger pausado, `run_as` explícito). Ambos en el mismo workspace, diferenciados por catálogo.
+- Targets: **`dev`** (`electrocasa_dev`, modo development, trigger activo con `pause_status: UNPAUSED` explícito) y **`prod`** (`electrocasa_prod`, modo production, trigger pausado, `run_as` explícito). Ambos en el mismo workspace, diferenciados por catálogo.
 
 ### Pasos de despliegue
 
@@ -317,8 +409,23 @@ Alternativa usada: pestaña **Lineage** de Catalog Explorer → ![lineage](img/l
 6. Subir el **lote 1** al volume (+ snapshot de marzo + `sucursales.csv`), esperar el trigger o correr `databricks bundle run electrocasa_job -t dev`.
 7. Anotar los conteos (tarea `validacion`) y repetir con los lotes 2 y 3.
 
-![bundle validate](img/bundle_validate.png)
+**Evidencia: despliegue exitoso del target `dev`** desde el panel **Deployments** del Git Folder:
+
+```
+[11/24/2026, 5:30:27 PM] Running "deploy" on "dev" target
+Source-linked deployment is enabled. Deployed resources reference the source files in your working tree instead of separate copies.
+Created pipelines.electrocasa_pipeline
+Created jobs.electrocasa_job
+Files: 0 uploaded, 0 deleted
+Resources: 2 created, 0 changed, 0 deleted, 0 unchanged
+[11/24/2026, 5:30:31 PM] Finished "deploy" on "dev" target successfully
+```
+
+Recursos creados: `[dev riospalermo] electrocasa_job_dev` y `[dev riospalermo] electrocasa_pipeline_dev`.
+
 ![bundle deploy](img/bundle_deploy.png)
+
+> Nota: el primer intento falló con `target with 'mode: development' cannot set trigger pause status to UNPAUSED by default`. En modo development no se puede activar los triggers con `presets.trigger_pause_status`. La solución fue declarar `pause_status` explícito en el trigger del job, a través de la variable `trigger_pausa`.
 
 ---
 
@@ -330,54 +437,172 @@ Conteos tomados de la salida de `02_validacion` después de cada lote.
 
 | Tabla | Lote 1 | Lote 2 | Lote 3 |
 |---|---|---|---|
-| bronze.ventas | 6.783 | 13.622 | 18.240 |
-| bronze.devoluciones | 1.387 | 3.091 | 4.217 |
-| bronze.empleados_eventos | 2.257 | 3.524 | 4.448 |
-| bronze.resenas | 5.292 | 9.280 | 9.280 |
-| bronze.catalogo | 2.305 | 4.705 | 4.705 |
-| bronze.sucursales | 40 | 40 | 40 |
-| bronze.tracking_envios | 15.139 | 15.139 | 15.139 |
+| bronze.ventas | 6.783 ✅ | 13.622 ✅ | 18.240 ✅ |
+| bronze.devoluciones | 1.387 ✅ | 3.091 ✅ | 4.217 ✅ |
+| bronze.empleados_eventos | 2.257 ✅ | 3.524 ✅ | 4.448 ✅ |
+| bronze.resenas | 5.292 ✅ | 9.280 ✅ | 9.280 ✅ (sin lote 3) |
+| bronze.catalogo | 2.305 ✅ | 4.705 ✅ | 4.705 ✅ (sin snapshot nuevo) |
+| bronze.sucursales | 40 ✅ | 40 ✅ | 40 ✅ |
+| bronze.tracking_envios | 15.139 ✅ | 15.139 ✅ | 15.139 ✅ |
 
-> Valores esperados según el README de datos; **confirmar con la salida real**.
+> ✅ = confirmado con la salida real de `02_validacion`; los tres lotes coinciden exactamente con los volúmenes del README de datos.
 
 ### Silver
 
 | Tabla | Lote 1 | Lote 2 | Lote 3 |
 |---|---|---|---|
-| silver.ventas | `<…>` | `<…>` | `<…>` |
-| silver.devoluciones | `<…>` | `<…>` | `<…>` |
-| silver.empleados_eventos | `<…>` | `<…>` | `<…>` |
-| silver.empleados_historia | `<…>` | `<…>` | `<…>` |
-| silver.resenas | `<…>` | `<…>` | `<…>` |
-| silver.catalogo / catalogo_actual | `<…>` | `<…>` | `<…>` |
-| silver.sucursales | `<…>` | `<…>` | `<…>` |
-| silver.tracking | `<…>` | `<…>` | `<…>` |
+| silver.ventas | 6.604 | 13.118 | 17.488 |
+| silver.devoluciones | 1.301 | 2.877 | 3.908 |
+| silver.empleados_eventos | 2.239 | 3.495 | 4.410 |
+| silver.empleados_historia | 2.239 | 3.495 | 4.410 |
+| silver.resenas | 5.226 | 9.097 | 9.097 |
+| silver.catalogo / catalogo_actual | 2.280 / 2.280 | 4.680 / 2.400 | 4.680 / 2.400 |
+| silver.sucursales | 40 | 40 | 40 |
+| silver.tracking | 15.052 | 15.052 | 15.052 |
+
+### Gold
+
+| Tabla | Lote 1 | Lote 2 | Lote 3 |
+|---|---|---|---|
+| gold.ventas_netas_sucursal_mes | 120 (40 sucursales × mar-may) | 240 (40 × mar-ago) | 320 (40 × mar-oct) |
+| gold.top_productos_unidades | 10 | 10 | 10 |
+| gold.top_productos_tasa_devolucion | 10 | 10 | 10 |
+| gold.dotacion_sucursal_mes | 320 (40 sucursales × 8 cierres de mes) | 320 | 320 |
+| gold.ventas_vendedor_sucursal_mes | 2.009 | 4.078 | 5.502 |
+| gold.resenas_negativas_categoria_mes | 25 | 40 (5 categorías × 8 meses) | 40 |
+| gold.despachos_courier | 4 | 4 | 4 |
+| gold.resenas_negativas_por_origen | 3 | 3 | 3 |
+| gold.empleados_vista | 1.220 | 1.414 | 1.499 |
 
 ### Rechazados (`politica = 'drop'`) por fuente
 
 | Fuente | Lote 1 | Lote 2 | Lote 3 |
 |---|---|---|---|
-| ventas | `<…>` | `<…>` | `<…>` |
-| devoluciones | `<…>` | `<…>` | `<…>` |
-| empleados | `<…>` | `<…>` | `<…>` |
-| resenas | `<…>` | `<…>` | `<…>` |
-| catalogo | `<…>` | `<…>` | `<…>` |
-| tracking | `<…>` | `<…>` | `<…>` |
+| ventas | 179 | 384 | 512 |
+| devoluciones | 86 | 184 | 249 |
+| empleados | 18 | 29 | 38 |
+| resenas | 66 | 103 | 103 |
+| catalogo | 0 | 0 | 0 |
+| tracking | 0 | 0 | 0 |
+
+**Lote 1, lectura:** los 7 conteos de Bronze coinciden con el README de datos. Silver de devoluciones (1.387 − 86 = 1.301), empleados (2.257 − 18 = 2.239) y reseñas (5.292 − 66 = 5.226) cuadra exactamente con los rechazados. En catálogo, 2.305 → 2.280: los 25 productos repetidos del snapshot de marzo quedan una sola vez. En ventas, 6.783 − 179 = 6.604. En tracking, 15.139 eventos → 15.052: se eliminaron **87 mensajes reprocesados**, con 0 rechazos y muchas advertencias `venta_existe`: los envíos referencian ventas de lotes que todavía no llegaron, y bajan con los lotes 2 y 3.
+
+![validación lote 1: conteos](img/validacion_lote1_conteos.png)
+![validación lote 1: rechazos](img/validacion_lote1_rechazos.png)
+
+Violaciones por regla, lote 1:
+
+| Fuente | Regla | Política | Violaciones |
+|---|---|---|---|
+| ventas | monto_positivo | drop | 127 |
+| ventas | sucursal_presente | drop | 32 |
+| ventas | cantidad_positiva | drop | 22 |
+| ventas | metodo_pago_conocido | warn | 416 |
+| ventas | producto_en_catalogo | warn | 23 |
+| devoluciones | reembolso_valido | drop | 86 |
+| devoluciones | venta_existe | drop | 64 |
+| devoluciones | motivo_presente | warn | 30 |
+| empleados | fecha_evento_presente | drop | 18 |
+| empleados | dni_presente | warn | 28 |
+| empleados | dni_unico | warn | 18 |
+| empleados | salario_en_rango | warn | 8 |
+| resenas | calificacion_valida | drop | 66 |
+| resenas | comentario_presente | warn | 62 |
+| resenas | producto_en_catalogo | warn | 61 |
+| catalogo | marca_presente | warn | 46 |
+| catalogo | precio_valido | warn | 42 |
+| tracking | venta_existe | warn | 9.321 |
+| tracking | fecha_actualizacion_presente | warn | 285 |
+
+**Ajuste tras el lote 1:** las 416 advertencias de `metodo_pago_conocido` venían de una sola variante sin mapear, `TRF` (402 filas en Silver; el resto eran filas también rechazadas por otra regla). Se agregó `^trf$` al patrón de `transferencia` en `utils/normalizacion.py`, y desde el lote 2 la advertencia queda en 0. Es un ejemplo del ciclo exploración → contrato → código.
+
+**Ajuste tras la exploración final:** la consulta de couriers en Bronze mostró que `Olva` y `Olva Courier` son el mismo courier escrito de dos formas. Con solo unificar el casing, P6 mostraba 4 couriers. Se agregó el conjunto cerrado `COURIERS` en `utils/normalizacion.py`, y P6 queda con 3 couriers: Olva Courier, Shalom y Servientrega.
+
+Las reglas de conjunto cerrado `tipo_evento_valido`, `categoria_valida`, `estado_valido` y `canal_valido` no tuvieron ninguna violación: los mapeos cubren todas las variantes de escritura de Bronze.
+
+**Lote 2, lectura:** Bronze coincide otra vez con el README de datos. La **deduplicación de reingestas** se ve en la tabla Bronze vs Silver:
+
+| Fuente | Filas Bronze | IDs distintos Bronze | Filas Silver |
+|---|---|---|---|
+| ventas | 13.622 | 13.502 (**120 ventas reingresadas**) | 13.118 = 13.502 − 384 rechazadas |
+| devoluciones | 3.091 | 3.061 (**30 reingresadas**) | 2.877 = 3.061 − 184 |
+| reseñas | 9.280 | 9.200 (**80 reingresadas**) | 9.097 = 9.200 − 103 |
+| tracking | 15.139 | 15.139 | 15.052 (87 reprocesados) |
+
+- Las filas repetidas llegan a Bronze, que es append, pero quedan **una sola vez** en Silver.
+- Catálogo: `silver.catalogo` = 2.280 (marzo) + 2.400 (agosto) = 4.680 versiones, y `catalogo_actual` = 2.400 productos con la categoría del **último** snapshot.
+- La advertencia `metodo_pago_conocido` desapareció tras mapear `TRF`.
+- `tracking.venta_existe` bajó de 9.321 a 3.946 porque ya llegaron las ventas de junio a agosto.
+
+
+**Lote 3, lectura (corrida lanzada por llegada de archivo):**
+
+| Fuente | Filas Bronze | IDs distintos Bronze | Filas Silver |
+|---|---|---|---|
+| ventas | 18.240 | 18.000 (**240 reingresadas en total**) | 17.488 = 18.000 − 512 |
+| devoluciones | 4.217 | 4.157 (**60 reingresadas**) | 3.908 = 4.157 − 249 |
+| reseñas | 9.280 | 9.200 | 9.097 |
+| tracking | 15.139 | 15.139 | 15.052 |
+
+- `empleados_eventos`: 4.448 − 38 rechazados = 4.410 eventos, y la historia SCD2 tiene 4.410 versiones. Los eventos de junio a agosto registrados tarde (lote 3) se ubican por `fecha_evento` y no por la fecha de llegada.
+- `gold.ventas_netas_sucursal_mes` ya cubre los 8 meses del período: 40 × 8 = 320.
+- `tracking.venta_existe`: 9.321 → 3.946 → **415**. Con las ventas completas, solo quedan los envíos con una venta que realmente no existe (referencias huérfanas de la fuente).
 
 **Lectura de los conteos:** Bronze crece con cada lote (incluye las reingestas), pero `silver.ventas`, `silver.devoluciones` y `silver.resenas` crecen solo con los IDs nuevos (la consulta de `02_validacion` compara filas de Bronze, IDs distintos y filas de Silver). Los eventos tardíos del lote 3 cambian versiones de junio-agosto en `silver.empleados_historia` (ver `03_monitoreo`, celda 7).
 
-![pipeline lote 1](img/pipeline_lote1.png)
-![job lote 3](img/job_lote3.png)
+**Job del lote 1** (run `3120155628384`, 3m 57s, 4 tareas en verde):
+
+![job lote 1](img/job_lote1.png)
+**Lote 3, disparo automático por llegada de archivo.** Con el trigger activo se subieron los 3 archivos del lote 3 (ventas, empleados y devoluciones). El trigger detectó los cambios (14 archivos en total), esperó los 120 s de `wait_after_last_change_seconds` y lanzó la corrida sola, con **Launched: By file arrival**, a las 18:41. Los lotes 1 y 2 se lanzaron manualmente: el lote 2 se subió con el trigger pausado y, al reactivarlo, el trigger tomó esos archivos como punto de partida, que es el caso que el enunciado anticipa.
+
+![trigger detecta los archivos](img/trigger_lote3_detecta.png)
+![corrida lanzada por llegada de archivo](img/trigger_lote3.png)
 
 ---
 
 ## 10. Monitoreo
 
-- **Event log del pipeline** (`event_log(TABLE(...))`): actualizaciones y métricas por expectativa (filas OK / fallidas) → ![event log](img/event_log.png)
-- **Historial del job** (`system.lakeflow.job_run_timeline`) → captura o error + alternativa (pestaña Runs del job).
-- **Costos** (`system.billing.usage`, reto opcional) → captura o error.
+Fuente: `notebooks/03_monitoreo_y_evidencias.ipynb`, ejecutado después del lote 3.
 
----
+### 10.1 Event log del pipeline
+
+`event_log(TABLE(electrocasa_dev.silver.ventas))`. Hay una actualización por lote, todas lanzadas por `JOB_TASK` y terminadas en `COMPLETED`:
+
+| Update | Inicio (UTC) | Fin (UTC) | Estado |
+|---|---|---|---|
+| `6b6226` (lote 1) | 22:50:35 | 22:52:35 | COMPLETED |
+| `665be1` (lote 2) | 23:23:34 | 23:26:01 | COMPLETED |
+| `ccb1e6` (lote 3) | 23:41:54 | 23:44:18 | COMPLETED |
+
+Cada actualización pasa por `WAITING_FOR_RESOURCES → INITIALIZING → SETTING_UP_TABLES → RUNNING → COMPLETED`.
+
+**Métricas de expectativas** del event log (`details:flow_progress:data_quality`), acumuladas en todas las actualizaciones. Extracto:
+
+| Tabla | Expectativa | Filas OK | Filas fallidas |
+|---|---|---|---|
+| silver.ventas | monto_positivo | 37.550 | 735 |
+| silver.ventas | sucursal_presente | 38.074 | 211 |
+| silver.ventas | cantidad_positiva | 38.142 | 143 |
+| silver.devoluciones | reembolso_valido | 8.086 | 519 |
+| silver.devoluciones | venta_existe | 8.218 | 387 |
+| silver.empleados_eventos | fecha_evento_presente | 10.144 | 85 |
+| silver.resenas | calificacion_valida | 23.420 | 272 |
+| silver.tracking | estado_valido | 45.156 | 0 |
+| silver.sucursales | sucursal_id_presente (fail) | 120 | 0 |
+
+### 10.2 Historial de corridas del job (`system.lakeflow.job_run_timeline`)
+
+`system.lakeflow` **sí está disponible** en este workspace. Para las corridas del job se cruza con `system.lakeflow.jobs`, quedándose con la última versión de cada job:
+
+| Run | Inicio (UTC) | Fin (UTC) | Resultado |
+|---|---|---|---|
+| `3120155628384` (lote 1) | 22:49:42 | 22:53:39 | SUCCEEDED |
+| `969383745965523` (lote 2) | 23:22:48 | 23:27:00 | SUCCEEDED |
+| lote 3 (file arrival) | 23:41 | — | SUCCEEDED (visible en la pestaña Runs; las tablas de sistema tienen latencia) |
+
+### 10.3 Costos (`system.billing.usage`, reto opcional)
+
+La tabla está disponible. Al momento de la consulta solo mostraba `DEFAULT_STORAGE` (0,0125 DBU): en Free Edition el consumo de serverless aparece con varias horas de retraso. La consulta queda en el notebook para volver a ejecutarla.
 
 ## 11. Retos opcionales implementados
 
@@ -385,8 +610,8 @@ Conteos tomados de la salida de `02_validacion` después de cada lote.
 |---|---|
 | **Ingesta por metadata** | `src/electrocasa/config/fuentes.json`: Bronze (Auto Loader) y COPY INTO se generan desde ese archivo; una fuente nueva = una entrada nueva. |
 | **Cuarentena con trazabilidad completa** | `silver.cuarentena`: fuente, regla, lote, archivo, fechas, registro JSON; se reprocesa al corregir la regla. |
-| **VARIANT en Reseñas** | `metadata` → `VARIANT` en Silver (`try_parse_json`); `gold.resenas_negativas_por_origen`. |
-| Costos medidos | Consulta a `system.billing.usage` en `03_monitoreo` (si la tabla está disponible). |
+| **VARIANT en Reseñas** | `metadata` → `VARIANT` en Silver (`try_parse_json`). La estructura real, obtenida con `schema_of_variant_agg`, es `OBJECT<app: OBJECT<so, version>, campania: OBJECT<codigo, cupon_usado>, kiosko_id, navegador, origen, sucursal_id>`. `gold.resenas_negativas_por_origen` usa `metadata:origen`, `metadata:app.so` y `metadata:app.version`. Resultado: app 17,89 %, web 16,97 %, tienda 16,54 % de reseñas negativas. |
+| Costos medidos | Consulta a `system.billing.usage` en `03_monitoreo`. La tabla está disponible; el consumo serverless aparece con retraso (ver 10.3). |
 
 ---
 
